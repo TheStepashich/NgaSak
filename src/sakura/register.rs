@@ -42,13 +42,27 @@ struct RegisterResponse {
 }
 
 pub fn config_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_default()
-        .join(".config/sakura2fa/config.json")
+    crate::config::config_path().unwrap_or_else(|_| dirs::home_dir().unwrap_or_default().join(".config/ngasak/config.toml"))
 }
 
 pub fn load_config() -> Result<SakuraConfigFile> {
-    let path = config_path();
+    let ngasak_cfg = crate::config::load_config()?;
+    if ngasak_cfg.sakura.server_address.is_some() && ngasak_cfg.sakura.device_token.is_some() {
+        return Ok(SakuraConfigFile {
+            server_address: ngasak_cfg.sakura.server_address.clone().unwrap_or_default(),
+            server_uuid: ngasak_cfg.sakura.server_uuid.clone().unwrap_or_default(),
+            server_name: ngasak_cfg.sakura.server_name.clone(),
+            device_token: ngasak_cfg.sakura.device_token.clone().unwrap_or_default(),
+            auth_token: ngasak_cfg.sakura.auth_token.clone(),
+            firebase_token: ngasak_cfg.sakura.firebase_token.clone(),
+            registry_code_pending: None,
+            registry_token: None,
+            registry_code: None,
+            extra: serde_json::Map::new(),
+        });
+    }
+    // fallback
+    let path = dirs::home_dir().unwrap_or_default().join(".config/sakura2fa/config.json");
     if !path.exists() {
         anyhow::bail!("Config not found: {}", path.display());
     }
@@ -57,17 +71,27 @@ pub fn load_config() -> Result<SakuraConfigFile> {
 }
 
 pub fn save_config(cfg: &SakuraConfigFile) -> Result<()> {
-    let path = config_path();
+    let mut ngasak_cfg = crate::config::load_config()?;
+    ngasak_cfg.sakura.server_address = Some(cfg.server_address.clone());
+    ngasak_cfg.sakura.server_uuid = Some(cfg.server_uuid.clone());
+    ngasak_cfg.sakura.device_token = Some(cfg.device_token.clone());
+    ngasak_cfg.sakura.auth_token = cfg.auth_token.clone();
+    ngasak_cfg.sakura.firebase_token = cfg.firebase_token.clone();
+    ngasak_cfg.sakura.server_name = cfg.server_name.clone();
+    crate::config::save_config(&ngasak_cfg)?;
+    // also keep legacy for compatibility
+    let path = dirs::home_dir().unwrap_or_default().join(".config/sakura2fa/config.json");
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        let _ = fs::create_dir_all(parent);
     }
     let content = serde_json::to_string_pretty(cfg)?;
-    fs::write(&path, content)?;
+    let _ = fs::write(&path, content);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
     }
+    info!("Saved to {}", crate::config::config_path()?.display());
     Ok(())
 }
 

@@ -63,12 +63,7 @@ impl SakuraClient {
     }
     
     pub fn from_config() -> Result<Self> {
-        let config_path = crate::config::sakura_config_path();
-        if !config_path.exists() {
-            anyhow::bail!("Sakura config not found: {:?}", config_path);
-        }
-        let content = std::fs::read_to_string(&config_path)?;
-        let config: SakuraConfig = serde_json::from_str(&content)?;
+        let config = crate::config::load_sakura_merged()?;
         Self::new(config)
     }
     

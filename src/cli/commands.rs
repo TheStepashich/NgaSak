@@ -74,6 +74,8 @@ pub enum SakuraCommands {
     Ping,
     /// Check pending requests
     Check(CheckArgs),
+    /// Get SCP compliance/info
+    Creds(CredsArgs),
     /// Approve a pending request by guid
     Approve { guid: String },
     /// Deny a pending request by guid
@@ -106,6 +108,14 @@ pub struct RegisterArgs {
 pub struct CheckArgs {
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Args)]
+pub struct CredsArgs {
+    #[arg(long)]
+    pub json: bool,
+    #[arg(long)]
+    pub raw: bool,
 }
 
 #[derive(Args)]
@@ -152,6 +162,10 @@ pub enum ConfigCommands {
     Init,
     /// Edit config path
     Path,
+    /// Save SCP password to system keyring
+    SetPassword,
+    /// Remove SCP password from system keyring
+    ClearPassword,
 }
 
 pub async fn cmd_run(args: RunArgs) -> Result<()> {
@@ -180,6 +194,20 @@ pub async fn cmd_run(args: RunArgs) -> Result<()> {
     }
 
     crate::scp::login_er::do_login_er(&cfg.scp.login_url, &login, &password).await?;
+
+    let cmd = cfg.run.post_command.clone().or_else(|| cfg.run.post_run.clone());
+    if let Some(cmd) = cmd {
+        let cmd = cmd.trim().to_string();
+        if !cmd.is_empty() {
+            tracing::info!("Running post_command: {}", cmd);
+            let _ = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&cmd)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
+    }
 
     Ok(())
 }
@@ -373,6 +401,18 @@ pub async fn cmd_sakura(args: SakuraArgs) -> Result<()> {
                 println!("  [{}] guid={} message={}", i + 1, guid, msg);
             }
         }
+        SakuraCommands::Creds(args) => {
+            let agent = crate::sakura::agent::AgentClient::new()?;
+            let compliance = agent.check().await?;
+            let info = agent.uid().await?;
+            if args.json || args.raw {
+                let v = serde_json::json!({"compliance": compliance.trim(), "info": info.trim()});
+                println!("{}", serde_json::to_string(&v)?);
+            } else {
+                println!("COMPLIANCE={}", compliance.trim());
+                println!("INFO={}", info.trim());
+            }
+        }
         SakuraCommands::Approve { guid } => {
             let client = crate::sakura::client::SakuraClient::from_config()?;
             let resp = client.send_response(&guid, true).await?;
@@ -390,6 +430,26 @@ pub async fn cmd_sakura(args: SakuraArgs) -> Result<()> {
         SakuraCommands::History => {
             let client = crate::sakura::client::SakuraClient::from_config()?;
             let resp = client.history().await?;
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&resp) {
+                if let Some(arr) = v.get("payload").and_then(|p| p.as_array()) {
+                    for item in arr {
+                        let guid = item.get("requestUUID").or_else(|| item.get("guid")).and_then(|x| x.as_str()).unwrap_or("-");
+                        let user = item.get("user").and_then(|x| x.as_str()).unwrap_or("-");
+                        let msg = item.get("message").and_then(|x| x.as_str()).unwrap_or("");
+                        let created = item.get("createdAt").and_then(|x| x.as_str()).unwrap_or("-");
+                        let closed = item.get("closedAt").and_then(|x| x.as_str()).unwrap_or("-");
+                        let answer = item.get("answer").and_then(|x| x.as_bool());
+                        let status = match answer {
+                            Some(true) => "APPROVED",
+                            Some(false) => "DENIED",
+                            None => "PENDING",
+                        };
+                        println!("{status} {created} -> {closed} user={user} guid={guid} msg={msg}");
+                        continue;
+                    }
+                    return Ok(());
+                }
+            }
             println!("{}", resp);
         }
         SakuraCommands::Poll(args) => {
@@ -495,6 +555,32 @@ pub async fn cmd_config(args: ConfigArgs) -> Result<()> {
         }
         ConfigCommands::Path => {
             println!("{}", crate::config::config_path()?.display());
+        }
+        ConfigCommands::SetPassword => {
+            let cfg = crate::config::load_config()?;
+            let login = cfg
+                .scp
+                .login
+                .clone()
+                .or_else(|| std::env::var("SCP_LOGIN").ok())
+                .unwrap_or_else(|| inquire::Text::new("SCP Login:").prompt().unwrap_or_default());
+            let password = rpassword::prompt_password("SCP Password: ")?;
+            if login.trim().is_empty() || password.is_empty() {
+                anyhow::bail!("Login/password must not be empty");
+            }
+            let entry = keyring::Entry::new("ngasak", "scp")?;
+            entry.set_password(&format!("{}:{}", login.trim(), password))?;
+            info!("SCP credentials saved to system keyring (service=ngasak, account=scp)");
+        }
+        ConfigCommands::ClearPassword => {
+            if let Ok(entry) = keyring::Entry::new("ngasak", "scp") {
+                match entry.delete_credential() {
+                    Ok(_) => info!("SCP credentials removed from keyring"),
+                    Err(e) => warn!("Nothing to remove or failed: {}", e),
+                }
+            } else {
+                warn!("Could not access keyring");
+            }
         }
     }
     Ok(())
