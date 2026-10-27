@@ -39,11 +39,19 @@ use_dbus = true
 [sakura]
 poll_interval = 2.0
 check_timeout = 10
-
+server_address = "https://mapp2fasak-m.mos.ru/"
+server_uuid = "800ddb8a-8c8c-43d0-9095-bc9e17904d36"
+device_token = ""
+auth_token = ""
+server_name = "DIT-2"
 [scp]
 login_url = "https://scp.mos.ru/api/login-er"
-post_delay = 30
+post_delay = 45
 login = "ShichkovSD"
+
+[run]
+post_command = "/home/thestepashich/Programs/KSU/AUTOSTART.sh g1"
+
 ```
 
 ### Сохранение пароля SCP

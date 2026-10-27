@@ -1,41 +1,36 @@
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
-use tokio::process::Command;
-use tracing::debug;
+use anyhow::Result;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, serde::Serialize)]
 pub struct NgateStatus {
-    #[serde(rename = "assignedIP")]
-    pub assigned_ip: Option<String>,
-    #[serde(rename = "endTimeConstraint")]
-    pub end_time_constraint: Option<i64>,
-    #[serde(rename = "lastRefreshTime")]
-    pub last_refresh_time: Option<serde_json::Value>,
-    #[serde(rename = "persistentSessionID")]
-    pub persistent_session_id: Option<serde_json::Value>,
-    #[serde(rename = "sessionID")]
-    pub session_id: Option<String>,
-    pub status: String,
-    #[serde(rename = "vpnGateIP")]
-    pub vpn_gate_ip: Option<String>,
+    pub online: bool,
+    pub raw: Option<String>,
 }
 
-pub async fn get_status(binary: &str) -> Result<NgateStatus> {
-    debug!("Checking ngate status with {}", binary);
-    let output = Command::new(binary)
-        .arg("-I")
-        .output()
-        .await
-        .context(format!("Failed to run {}", binary))?;
-    
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let status: NgateStatus = serde_json::from_str(&stdout).context("Failed to parse ngate status")?;
-    Ok(status)
-}
-
-pub async fn is_online(binary: &str) -> Result<bool> {
-    match get_status(binary).await {
-        Ok(s) => Ok(s.status == "Online"),
-        Err(_) => Ok(false),
+#[cfg(target_os = "linux")]
+pub async fn is_online(bin: &str) -> Result<bool> {
+    use tokio::process::Command;
+    let out = Command::new(bin).arg("-I").output().await?;
+    if !out.status.success() {
+        return Ok(false);
     }
+    let s = String::from_utf8_lossy(&out.stdout).to_lowercase();
+    if s.contains("online") {
+        return Ok(true);
+    }
+    if s.contains("offline") {
+        return Ok(false);
+    }
+    Ok(s.contains("online"))
+}
+
+#[cfg(target_os = "windows")]
+pub async fn is_online(bin: &str) -> Result<bool> {
+    let cfg = crate::config::load_config()?;
+    let backend = crate::ngate::create_backend(&cfg);
+    backend.status().await
+}
+
+pub async fn get_status(bin: &str) -> Result<NgateStatus> {
+    let online = is_online(bin).await?;
+    Ok(NgateStatus { online, raw: None })
 }
