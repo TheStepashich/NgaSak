@@ -14,7 +14,6 @@ tokio = { version = "1.45", features = ["rt-multi-thread", "macros", "time", "pr
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "cookies", "multipart"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-zbus = { version = "5.9", default-features = false, features = ["tokio"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 toml = "0.8"
@@ -22,12 +21,27 @@ dirs = "6.0"
 url = "2.5"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
-keyring = { version = "3.6", features = ["sync-secret-service", "vendored"] }
 hostname = "0.4"
 inquire = "0.7"
 rpassword = "7.3"
 tokio-util = "0.7"
 futures = "0.3"
+
+[target.'cfg(unix)'.dependencies]
+zbus = { version = "5.9", default-features = false, features = ["tokio"] }
+keyring = { version = "3.6", features = ["sync-secret-service", "vendored"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Threading",
+] }
+keyring = { version = "3.6", features = ["windows-native"] }
 
 [profile.release]
 lto = true

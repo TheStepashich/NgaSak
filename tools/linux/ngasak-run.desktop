@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=NgaSak Run
+Comment=Ngate connect -> Sakura autopush -> SCP login-er
+# Adjust to your install location, e.g. ~/.cargo/bin/ngasak after
+# `cargo install --path .`.
+Exec=ngasak run
+Terminal=true
+Categories=Network;
+Icon=network-vpn

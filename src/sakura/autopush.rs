@@ -55,7 +55,7 @@ impl Autopush {
     pub async fn run_until(&mut self, shutdown: CancellationToken) -> Result<()> {
         loop {
             if shutdown.is_cancelled() {
-                info!("Sakura autopush stopped");
+                debug!("Sakura autopush stopped");
                 return Ok(());
             }
             if let Err(e) = self.check_and_approve().await {
@@ -64,7 +64,7 @@ impl Autopush {
             tokio::select! {
                 _ = tokio::time::sleep(self.interval) => {}
                 _ = shutdown.cancelled() => {
-                    info!("Sakura autopush stopped");
+                    debug!("Sakura autopush stopped");
                     return Ok(());
                 }
             }

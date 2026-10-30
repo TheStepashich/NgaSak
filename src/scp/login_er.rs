@@ -8,30 +8,45 @@ use tracing::{debug, info, warn};
 const SCP_INTERMEDIATE: &[u8] =
     include_bytes!("../certs/globalsign-gcc-r6-alphassl-ca-2025.pem");
 
-pub async fn do_login_er(url: &str, login: &str, password: &str) -> Result<()> {
+pub async fn do_login_er(url: &str, login: &str, password: &str, attempts: u32) -> Result<()> {
     info!("Starting login-er flow");
+
+    // Sakura sometimes considers the agent "not ready" for a while; restart
+    // its services if the local agent does not answer at all.
+    crate::sakura::restart::bring_up_agent()
+        .await
+        .context("Sakura agent readiness")?;
 
     let client = build_client().context("Failed to build HTTP client")?;
 
     let agent = crate::sakura::agent::AgentClient::new()?;
 
-    const ATTEMPTS: u32 = 3;
-    for attempt in 1..=ATTEMPTS {
-        let compliance = agent
-            .check()
-            .await
-            .context("Failed to get compliance from sakura agent")?;
-        let info_data = agent
-            .uid()
-            .await
-            .context("Failed to get info from sakura agent")?;
+    for attempt in 1..=attempts {
+        let resolution = gain_creds(&agent).await;
+
+        let (compliance, info_data) = match resolution {
+            Ok(v) => v,
+            Err(e) => {
+                if attempt < attempts {
+                    warn!(
+                        "sakura agent did not deliver compliance/info (attempt {}/{}): {e:#}; restarting its services",
+                        attempt, attempts
+                    );
+                    if let Err(re) = crate::sakura::restart::bring_up_agent().await {
+                        warn!("sakura agent still down: {re:#}");
+                    }
+                    continue;
+                }
+                return Err(e);
+            }
+        };
 
         info!(
             "Got compliance ({} chars) and info ({} chars), attempt {}/{}",
             compliance.len(),
             info_data.len(),
             attempt,
-            ATTEMPTS
+            attempts
         );
 
         let body = json!({
@@ -68,19 +83,39 @@ pub async fn do_login_er(url: &str, login: &str, password: &str) -> Result<()> {
             return Ok(());
         }
 
-        if status.is_server_error() && attempt < ATTEMPTS {
+        if attempt < attempts {
             warn!(
-                "SCP returned HTTP {}, retrying with fresh compliance/info in 15s",
+                "SCP returned HTTP {}, restarting sakura services and retrying with fresh compliance/info",
                 status
             );
-            tokio::time::sleep(Duration::from_secs(15)).await;
+            // The agent might have been the reason SCP rejected the POST:
+            // bring the services back up before the next take.
+            if let Err(re) = crate::sakura::restart::bring_up_agent().await {
+                warn!("sakura agent still down: {re:#}");
+            }
+            tokio::time::sleep(Duration::from_secs(3)).await;
             continue;
         }
 
         anyhow::bail!("Login-er failed: HTTP {} {}", status, text)
     }
 
-    unreachable!()
+    anyhow::bail!("Login-er exhausted all {} attempts", attempts)
+}
+
+// Both agent reads in one shot: either both succeed or the attempt fails.
+async fn gain_creds(
+    agent: &crate::sakura::agent::AgentClient,
+) -> Result<(String, String)> {
+    let compliance = agent
+        .check()
+        .await
+        .context("Failed to get compliance from sakura agent")?;
+    let info_data = agent
+        .uid()
+        .await
+        .context("Failed to get info from sakura agent")?;
+    Ok((compliance, info_data))
 }
 
 fn build_client() -> Result<Client> {

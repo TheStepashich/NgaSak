@@ -34,6 +34,20 @@ pub struct RunArgs {
     pub skip_sakura_push: bool,
 }
 
+// The arg-less launch (double-click on Windows) runs the whole flow with the
+// same budget as `ngasak run` would have.
+impl Default for RunArgs {
+    fn default() -> Self {
+        Self {
+            login: None,
+            password: None,
+            sakura_wait: 120,
+            skip_ngate: false,
+            skip_sakura_push: false,
+        }
+    }
+}
+
 #[derive(Args)]
 pub struct NgateArgs {
     #[command(subcommand)]
@@ -44,9 +58,9 @@ pub struct NgateArgs {
 pub enum NgateCommands {
     /// Check ngate status
     Status,
-    /// Connect via D-Bus (starts Sakura autopush unless --no-autopush)
+    /// Connect (D-Bus on Linux, command on Windows; starts Sakura autopush unless --no-autopush)
     Connect(ConnectArgs),
-    /// Connect via GUI (xdotool) - fallback
+    /// Connect via GUI fallback (xdotool on Linux, command on Windows)
     ConnectGui,
 }
 
@@ -193,19 +207,33 @@ pub async fn cmd_run(args: RunArgs) -> Result<()> {
         tokio::time::sleep(std::time::Duration::from_secs(cfg.scp.post_delay)).await;
     }
 
-    crate::scp::login_er::do_login_er(&cfg.scp.login_url, &login, &password).await?;
+    crate::scp::login_er::do_login_er(&cfg.scp.login_url, &login, &password, cfg.scp.attempts)
+        .await?;
 
     let cmd = cfg.run.post_command.clone().or_else(|| cfg.run.post_run.clone());
     if let Some(cmd) = cmd {
         let cmd = cmd.trim().to_string();
         if !cmd.is_empty() {
             tracing::info!("Running post_command: {}", cmd);
-            let _ = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(&cmd)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
+            #[cfg(target_os = "linux")]
+            {
+                let _ = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(&cmd)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+            }
+            #[cfg(target_os = "windows")]
+            {
+                let _ = std::process::Command::new("cmd.exe")
+                    .arg("/D")
+                    .arg("/C")
+                    .arg(&cmd)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+            }
         }
     }
 
@@ -241,34 +269,56 @@ async fn connect_ngate(cfg: &Config, autopush: PushFilter, wait_secs: u64) -> Re
         }
     };
 
-    info!("Connecting Ngate via D-Bus...");
-    let connect_result = match crate::ngate::dbus::connect().await {
-        Ok(_) => Ok(()),
-        Err(e) => {
-            warn!("D-Bus connect failed: {e:#}. Trying GUI fallback...");
-            crate::ngate::dbus::connect_gui_fallback().await
+    #[cfg(target_os = "linux")]
+    {
+        info!("Connecting Ngate via D-Bus...");
+        let connect_result = match crate::ngate::dbus::connect().await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                warn!("D-Bus connect failed: {e:#}. Trying GUI fallback...");
+                crate::ngate::dbus::connect_gui_fallback().await
+            }
+        };
+
+        if let Err(e) = connect_result {
+            token.cancel();
+            if let Some(handle) = autopush_handle {
+                let _ = handle.await;
+            }
+            return Err(e);
         }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // The Windows backend polls until the tunnel is up itself (the
+        // tunnel waits for the Sakura push), so it returns only when the
+        // state is verified; no second poll/log cycle here.
+        if let Err(e) = crate::ngate::create_backend(cfg).connect().await {
+            token.cancel();
+            if let Some(handle) = autopush_handle {
+                let _ = handle.await;
+            }
+            return Err(e);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    let online: bool = {
+        let mut waited = 0;
+        let mut online = false;
+        while waited < wait_secs {
+            if crate::ngate::status::is_online(&cfg.ngate.binary).await? {
+                online = true;
+                info!("Ngate Online after {}s", waited);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            waited += 1;
+        }
+        online
     };
-
-    if let Err(e) = connect_result {
-        token.cancel();
-        if let Some(handle) = autopush_handle {
-            let _ = handle.await;
-        }
-        return Err(e);
-    }
-
-    let mut waited = 0;
-    let mut online = false;
-    while waited < wait_secs {
-        if crate::ngate::status::is_online(&cfg.ngate.binary).await? {
-            online = true;
-            info!("Ngate Online after {}s", waited);
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        waited += 1;
-    }
+    #[cfg(target_os = "windows")]
+    let online: bool = true;
 
     token.cancel();
     if let Some(handle) = autopush_handle {
@@ -352,8 +402,16 @@ pub async fn cmd_ngate(args: NgateArgs) -> Result<()> {
             connect_ngate(&cfg, autopush, connect.wait).await?;
         }
         NgateCommands::ConnectGui => {
-            crate::ngate::dbus::connect_gui_fallback().await?;
-            info!("Connect attempted via xdotool");
+            #[cfg(target_os = "linux")]
+            {
+                crate::ngate::dbus::connect_gui_fallback().await?;
+                info!("Connect attempted via xdotool");
+            }
+            #[cfg(target_os = "windows")]
+            {
+                crate::ngate::create_backend(&cfg).connect_gui_fallback().await?;
+                info!("Connect attempted via Windows GUI fallback");
+            }
         }
     }
     Ok(())
@@ -538,7 +596,8 @@ pub async fn cmd_login_er(args: LoginErArgs) -> Result<()> {
         anyhow::bail!("Ngate not online. Connect first or use --skip-ngate-check");
     }
 
-    crate::scp::login_er::do_login_er(&cfg.scp.login_url, &login, &password).await?;
+    crate::scp::login_er::do_login_er(&cfg.scp.login_url, &login, &password, cfg.scp.attempts)
+        .await?;
     Ok(())
 }
 

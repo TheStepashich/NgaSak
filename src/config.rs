@@ -42,6 +42,10 @@ pub struct SakuraConfig {
     pub firebase_token: Option<String>,
     #[serde(default)]
     pub server_name: Option<String>,
+    // Custom command to restart the Sakura services when the local agent
+    // stops answering; overrides the built-in platform discovery.
+    #[serde(default)]
+    pub restart_command: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,7 +56,13 @@ pub struct ScpConfig {
     pub post_delay: u64,
     #[serde(default)]
     pub login: Option<String>,
+    // Login-er POST attempts; the Sakura services are restarted between
+    // failing attempts.
+    #[serde(default = "default_scp_attempts")]
+    pub attempts: u32,
 }
+
+fn default_scp_attempts() -> u32 { 3 }
 
 fn default_ngate_bin() -> String { "/opt/cprongate/ngateclient".to_string() }
 fn default_true() -> bool { true }
@@ -78,11 +88,13 @@ impl Default for Config {
                 auth_token: None,
                 firebase_token: None,
                 server_name: None,
+                restart_command: None,
             },
             scp: ScpConfig {
                 login_url: default_scp_url(),
                 post_delay: default_post_delay(),
                 login: None,
+                attempts: default_scp_attempts(),
             },
             run: RunConfig {
                 post_command: None,

@@ -5,6 +5,7 @@ pub enum NgaSakError {
     #[error("Ngate error: {0}")]
     Ngate(String),
     #[error("D-Bus error: {0}")]
+    #[cfg(target_os = "linux")]
     DBus(#[from] zbus::Error),
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
